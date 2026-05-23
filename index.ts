@@ -2,6 +2,8 @@ import { $ } from "bun";
 import fs from "fs/promises";
 import { homedir } from "os";
 import path from "path";
+import { isTranscriptionResult } from "./types.ts";
+import type { Config } from "./types.ts";
 
 // We define our log file path (XDG standard location)
 const LOG_FILE = `${homedir()}/.local/state/dictado.log`;
@@ -10,7 +12,7 @@ const LOG_FILE = `${homedir()}/.local/state/dictado.log`;
 const CONFIG_PATH = path.join(import.meta.dir, "config.json");
 
 // Default configuration values
-const DEFAULT_CONFIG = {
+const DEFAULT_CONFIG: Config = {
     sounds: {
         start: "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga",
         end: "/usr/share/sounds/freedesktop/stereo/message.oga",
@@ -29,24 +31,8 @@ const DEFAULT_CONFIG = {
     maxDuration: 240,
 };
 
-// Configuration type
-interface Config {
-    sounds: {
-        start: string;
-        end: string;
-        volume: number;
-    };
-    model: string;
-    arecord: {
-        format: string;
-        channels: number;
-        rate: number;
-    };
-    paths: {
-        audioFile: string;
-        pidFile: string;
-    };
-    maxDuration: number;
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }
 
 // Internal logging function - no need for shell '>>' redirection
@@ -69,7 +55,7 @@ async function loadConfig(): Promise<Config> {
             return config;
         }
     } catch (error) {
-        await log(`Error reading config file: ${error.message}`);
+        await log(`Error reading config file: ${errorMessage(error)}`);
     }
 
     // Config file doesn't exist or is invalid, create default
@@ -78,7 +64,7 @@ async function loadConfig(): Promise<Config> {
         await fs.writeFile(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2));
         await log("Default configuration created successfully");
     } catch (error) {
-        await log(`Error creating config file: ${error.message}`);
+        await log(`Error creating config file: ${errorMessage(error)}`);
     }
 
     return DEFAULT_CONFIG;
@@ -208,10 +194,10 @@ try {
         throw new Error(`HTTP ${response.status} - ${errorText}`);
     }
 
-    const result = await response.json();
+    const result: unknown = await response.json();
     await log(`Response received from OpenRouter. Success: true`);
 
-    if (result.text) {
+    if (isTranscriptionResult(result)) {
         const textoLimpio = result.text.trim();
         await log(`Transcript result: "${textoLimpio}"`);
 
@@ -244,6 +230,6 @@ try {
         process.exit(1);
     }
 } catch (error) {
-    await log(`FATAL ERROR: ${error.message}`);
+    await log(`FATAL ERROR: ${errorMessage(error)}`);
     process.exit(1);
 }
