@@ -26,6 +26,7 @@ const DEFAULT_CONFIG = {
         audioFile: "/tmp/dictado.wav",
         pidFile: "/tmp/dictado_pid.txt",
     },
+    maxDuration: 240,
 };
 
 // Configuration type
@@ -45,6 +46,7 @@ interface Config {
         audioFile: string;
         pidFile: string;
     };
+    maxDuration: number;
 }
 
 // Internal logging function - no need for shell '>>' redirection
@@ -116,16 +118,32 @@ async function getRecordingPid() {
     }
 }
 
+async function audioFileExists(): Promise<boolean> {
+    try {
+        const file = Bun.file(config.paths.audioFile);
+        return await file.exists() && (await file.size) > 0;
+    } catch {
+        return false;
+    }
+}
+
 const pid = await getRecordingPid();
+const hasAudio = await audioFileExists();
 
 // Calculate paplay volume from config
 const paplayVolume = volumeToPaplay(config.sounds.volume);
 
-if (!pid) {
+if (pid) {
+    await log(`Active recording found (PID: ${pid}). Stopping recording...`);
+    await $`kill -INT ${pid}`.quiet().nothrow();
+    await fs.unlink(config.paths.pidFile).catch(() => {});
+    await log("Stopped recording successfully.");
+}
+
+if (!pid && !hasAudio) {
     // ESTADO 1: Iniciar grabacion
     // Adding .quiet() prevents these from capturing or holding standard output streams
     await $`paplay --volume=${paplayVolume} ${config.sounds.start}`.quiet().nothrow();
-    // await $`notify-send "Grabando..." "Habla y presiona el atajo de nuevo."`.quiet().nothrow();
 
     const proc = Bun.spawn(
         [
@@ -136,6 +154,8 @@ if (!pid) {
             config.arecord.channels.toString(),
             "-r",
             config.arecord.rate.toString(),
+            "-d",
+            config.maxDuration.toString(),
             config.paths.audioFile,
         ],
         {
@@ -148,83 +168,82 @@ if (!pid) {
 
     await fs.writeFile(config.paths.pidFile, proc.pid.toString());
     await log(
-        `Started recording (PID: ${proc.pid}). Audio saving to ${config.paths.audioFile}`,
+        `Started recording (PID: ${proc.pid}). Max duration: ${config.maxDuration}s. Audio saving to ${config.paths.audioFile}`,
     );
     process.exit(0);
-} else {
-    // ESTADO 2: Detener, procesar y auto-tipear
-    await log(`Active recording found (PID: ${pid}). Stopping recording...`);
-    await $`kill -INT ${pid}`.quiet().nothrow();
-    await fs.unlink(config.paths.pidFile).catch(() => {});
-    await log("Stopped recording successfully.");
+}
 
-    try {
-        const file = Bun.file(config.paths.audioFile);
-        const arrayBuffer = await file.arrayBuffer();
-        const base64Audio = Buffer.from(arrayBuffer).toString("base64");
+// ESTADO 2: Transcribir y pegar (ya sea que matamos arecord manualmente o se auto-detuvo)
+try {
+    const file = Bun.file(config.paths.audioFile);
+    const arrayBuffer = await file.arrayBuffer();
+    const base64Audio = Buffer.from(arrayBuffer).toString("base64");
 
-        const payload = {
-            model: config.model,
-            input_audio: {
-                data: base64Audio,
-                format: "wav",
+    const payload = {
+        model: config.model,
+        input_audio: {
+            data: base64Audio,
+            format: "wav",
+        },
+    };
+
+    await log("Sending audio payload to OpenRouter...");
+    const response = await fetch(
+        "https://openrouter.ai/api/v1/audio/transcriptions",
+        {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${API_KEY}`,
+                "Content-Type": "application/json",
             },
-        };
+            body: JSON.stringify(payload),
+        },
+    );
 
-        await log("Sending audio payload to OpenRouter...");
-        const response = await fetch(
-            "https://openrouter.ai/api/v1/audio/transcriptions",
-            {
-                method: "POST",
-                headers: {
-                    Authorization: `Bearer ${API_KEY}`,
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify(payload),
-            },
+    if (!response.ok) {
+        const errorText = await response.text();
+        await log(
+            `ERROR: OpenRouter request failed. HTTP ${response.status} - ${errorText}`,
         );
+        throw new Error(`HTTP ${response.status} - ${errorText}`);
+    }
 
-        if (!response.ok) {
-            const errorText = await response.text();
-            await log(
-                `ERROR: OpenRouter request failed. HTTP ${response.status} - ${errorText}`,
-            );
-            throw new Error(`HTTP ${response.status} - ${errorText}`);
-        }
+    const result = await response.json();
+    await log(`Response received from OpenRouter. Success: true`);
 
-        const result = await response.json();
-        await log(`Response received from OpenRouter. Success: true`);
+    if (result.text) {
+        const textoLimpio = result.text.trim();
+        await log(`Transcript result: "${textoLimpio}"`);
 
-        if (result.text) {
-            const textoLimpio = result.text.trim();
-            await log(`Transcript result: "${textoLimpio}"`);
+        // Manually spawn xclip and pipe the text directly to its stdin
+        const clipProc = Bun.spawn(
+            ["xclip", "-selection", "clipboard"],
+            { stdin: "pipe" },
+        );
+        clipProc.stdin.write(textoLimpio);
+        clipProc.stdin.flush();
+        clipProc.stdin.end(); // This sends the EOF immediately!
+        await clipProc.exited; // Wait for it to close (should be instant now)
 
-            // Manually spawn xclip and pipe the text directly to its stdin
-            const clipProc = Bun.spawn(
-                ["xclip", "-selection", "clipboard"],
-                { stdin: "pipe" },
-            );
-            clipProc.stdin.write(textoLimpio);
-            clipProc.stdin.flush();
-            clipProc.stdin.end(); // This sends the EOF immediately!
-            await clipProc.exited; // Wait for it to close (should be instant now)
+        await $`paplay --volume=${paplayVolume} ${config.sounds.end}`.quiet()
+            .nothrow();
 
-            await $`paplay --volume=${paplayVolume} ${config.sounds.end}`.quiet()
-                .nothrow();
+        await Bun.sleep(200);
+        await $`xdotool key "ctrl+v"`.quiet().nothrow();
+        await log("Transcript pasted via xdotool successfully.");
 
-            await Bun.sleep(200);
-            await $`xdotool key "ctrl+v"`.quiet().nothrow();
-            await log("Transcript pasted via xdotool successfully.");
-            process.exit(0);
-        } else {
-            await log(
-                "ERROR: API returned a successful response but no 'text' field was found in the JSON.",
-            );
-            throw new Error("La API devolvio un JSON sin texto.");
-            process.exit(1);
-        }
-    } catch (error) {
-        await log(`FATAL ERROR: ${error.message}`);
+        // Cleanup: delete audio and pid files after successful transcription
+        await fs.unlink(config.paths.audioFile).catch(() => {});
+        await fs.unlink(config.paths.pidFile).catch(() => {});
+        process.exit(0);
+    } else {
+        await log(
+            "ERROR: API returned a successful response but no 'text' field was found in the JSON.",
+        );
+        throw new Error("La API devolvio un JSON sin texto.");
         process.exit(1);
     }
+} catch (error) {
+    await log(`FATAL ERROR: ${error.message}`);
+    process.exit(1);
 }

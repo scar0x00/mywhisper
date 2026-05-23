@@ -13,5 +13,6 @@
   "paths": {
     "audioFile": "/tmp/dictado.wav",
     "pidFile": "/tmp/dictado_pid.txt"
-  }
+  },
+  "maxDuration": 240
 }
