@@ -1,0 +1,17 @@
+{
+  "sounds": {
+    "start": "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga",
+    "end": "/usr/share/sounds/freedesktop/stereo/message.oga",
+    "volume": 75
+  },
+  "model": "openai/whisper-large-v3",
+  "arecord": {
+    "format": "S16_LE",
+    "channels": 1,
+    "rate": 16000
+  },
+  "paths": {
+    "audioFile": "/tmp/dictado.wav",
+    "pidFile": "/tmp/dictado_pid.txt"
+  }
+}
