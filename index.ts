@@ -106,7 +106,7 @@ try {
         await log(`Transcript result: "${textoLimpio}"`);
 
         const clipProc = Bun.spawn(
-            ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"],
             { stdin: "pipe" },
         );
         clipProc.stdin.write(textoLimpio);
