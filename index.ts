@@ -1,86 +1,13 @@
 import { $ } from "bun";
 import fs from "fs/promises";
 import { homedir } from "os";
-import path from "path";
 import { isTranscriptionResult } from "./types.ts";
-import type { Config } from "./types.ts";
-
-// We define our log file path (XDG standard location)
-const LOG_FILE = `${homedir()}/.local/state/dictado.log`;
-
-// Config file path (same directory as the script)
-const CONFIG_PATH = path.join(import.meta.dir, "config.json");
-
-// Default configuration values
-const DEFAULT_CONFIG: Config = {
-    sounds: {
-        start: "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga",
-        end: "/usr/share/sounds/freedesktop/stereo/message.oga",
-        volume: 30,
-    },
-    model: "openai/whisper-large-v3",
-    arecord: {
-        format: "S16_LE",
-        channels: 1,
-        rate: 16000,
-    },
-    paths: {
-        audioFile: "/tmp/dictado.wav",
-        pidFile: "/tmp/dictado_pid.txt",
-    },
-    maxDuration: 240,
-};
-
-function errorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-}
-
-// Internal logging function - no need for shell '>>' redirection
-async function log(message: string) {
-    const timestamp = new Date().toISOString();
-    const formattedMessage = `[${timestamp}] ${message}\n`;
-
-    // console.log(`[${timestamp}] ${message}`);
-    await fs.appendFile(LOG_FILE, formattedMessage).catch(() => {});
-}
-
-// Load or create configuration
-async function loadConfig(): Promise<Config> {
-    try {
-        const configFile = Bun.file(CONFIG_PATH);
-        if (await configFile.exists()) {
-            const configText = await configFile.text();
-            const config = JSON.parse(configText) as Config;
-            await log(`Configuration loaded from ${CONFIG_PATH}`);
-            return config;
-        }
-    } catch (error) {
-        await log(`Error reading config file: ${errorMessage(error)}`);
-    }
-
-    // Config file doesn't exist or is invalid, create default
-    await log(`Creating default configuration at ${CONFIG_PATH}`);
-    try {
-        await fs.writeFile(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2));
-        await log("Default configuration created successfully");
-    } catch (error) {
-        await log(`Error creating config file: ${errorMessage(error)}`);
-    }
-
-    return DEFAULT_CONFIG;
-}
-
-// Convert volume from 1-100 scale to paplay's 0-65536 scale
-function volumeToPaplay(volume: number): number {
-    // Clamp volume between 1 and 100
-    const clampedVolume = Math.max(1, Math.min(100, volume));
-    // Convert to paplay scale (0-65536)
-    return Math.round((clampedVolume / 100) * 65536);
-}
+import { log, errorMessage } from "./utils.ts";
+import { loadConfig } from "./config.ts";
+import { volumeToPaplay, getRecordingPid, audioFileExists } from "./audio.ts";
 
 await log("--- Script begins execution ---");
 
-// Load configuration
 const config = await loadConfig();
 
 const KEY_PATH = `${homedir()}/.config/openrouter_key`;
@@ -94,29 +21,9 @@ try {
     process.exit(1);
 }
 
-async function getRecordingPid() {
-    try {
-        const pid = await fs.readFile(config.paths.pidFile, "utf8");
-        const { exitCode } = await $`ps -p ${pid}`.quiet().nothrow();
-        return exitCode === 0 ? pid : null;
-    } catch {
-        return null;
-    }
-}
+const pid = await getRecordingPid(config.paths.pidFile);
+const hasAudio = await audioFileExists(config.paths.audioFile);
 
-async function audioFileExists(): Promise<boolean> {
-    try {
-        const file = Bun.file(config.paths.audioFile);
-        return await file.exists() && (await file.size) > 0;
-    } catch {
-        return false;
-    }
-}
-
-const pid = await getRecordingPid();
-const hasAudio = await audioFileExists();
-
-// Calculate paplay volume from config
 const paplayVolume = volumeToPaplay(config.sounds.volume);
 
 if (pid) {
@@ -127,8 +34,6 @@ if (pid) {
 }
 
 if (!pid && !hasAudio) {
-    // ESTADO 1: Iniciar grabacion
-    // Adding .quiet() prevents these from capturing or holding standard output streams
     await $`paplay --volume=${paplayVolume} ${config.sounds.start}`.quiet().nothrow();
 
     const proc = Bun.spawn(
@@ -159,7 +64,6 @@ if (!pid && !hasAudio) {
     process.exit(0);
 }
 
-// ESTADO 2: Transcribir y pegar (ya sea que matamos arecord manualmente o se auto-detuvo)
 try {
     const file = Bun.file(config.paths.audioFile);
     const arrayBuffer = await file.arrayBuffer();
@@ -201,7 +105,6 @@ try {
         const textoLimpio = result.text.trim();
         await log(`Transcript result: "${textoLimpio}"`);
 
-        // Manually spawn xclip and pipe the text directly to its stdin
         const clipProc = Bun.spawn(
             ["xclip", "-selection", "clipboard"],
             { stdin: "pipe" },
@@ -218,7 +121,6 @@ try {
         await $`xdotool key "ctrl+v"`.quiet().nothrow();
         await log("Transcript pasted via xdotool successfully.");
 
-        // Cleanup: delete audio and pid files after successful transcription
         await fs.unlink(config.paths.audioFile).catch(() => {});
         await fs.unlink(config.paths.pidFile).catch(() => {});
         process.exit(0);
@@ -227,7 +129,6 @@ try {
             "ERROR: API returned a successful response but no 'text' field was found in the JSON.",
         );
         throw new Error("La API devolvio un JSON sin texto.");
-        process.exit(1);
     }
 } catch (error) {
     await log(`FATAL ERROR: ${errorMessage(error)}`);

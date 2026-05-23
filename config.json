@@ -2,7 +2,7 @@
   "sounds": {
     "start": "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga",
     "end": "/usr/share/sounds/freedesktop/stereo/message.oga",
-    "volume": 75
+    "volume": 100
   },
   "model": "openai/whisper-large-v3",
   "arecord": {
